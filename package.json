@@ -1,0 +1,33 @@
+{
+  "name": "qa-wapp-bdd-python",
+  "version": "1.0.0",
+  "description": "Guía rápida para ejecutar cada feature por nombre y/o archivo.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "bdd:dry": "cucumber-js --dry-run",
+    "cucumber": "cucumber-js",
+    "bdd": "cucumber-js",
+  "bdd:report": "bash -lc 'rm -rf reports && mkdir -p reports && cucumber-js -p report; status=$?; node scripts/generate-report.js || true; exit $status'",
+  "bdd:report:render": "node scripts/generate-report.js",
+    "typecheck": "tsc --noEmit",
+    "postinstall": "playwright install"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@cucumber/cucumber": "^12.2.0",
+    "@cucumber/html-formatter": "^21.14.0",
+    "@cucumber/pretty-formatter": "^2.1.0",
+    "@types/node": "^24.3.0",
+    "cucumber-html-formatter": "^3.1.0",
+    "cucumber-html-reporter": "^7.2.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "playwright": "^1.55.0"
+  }
+}

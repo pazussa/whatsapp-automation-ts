@@ -1,0 +1,29 @@
+# Node/TypeScript
+node_modules/
+package-lock.json
+npm-debug.log*
+yarn.lock
+pnpm-lock.yaml
+
+# Build artifacts
+/dist/
+/out/
+/coverage/
+
+# Playwright/Chromium user data
+**/.local-chromium/
+**/playwright/.cache/
+**/playwright-report/
+
+# Project runtime artifacts
+reports/
+screenshots/
+.whatsapp-session-qa/
+.env
+.env.*
+
+# OS & editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
