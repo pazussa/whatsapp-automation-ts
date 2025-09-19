@@ -3,30 +3,18 @@ import fs from "node:fs";
 import { chromium, BrowserContext, Page, Locator } from "playwright";
 import { loadConfig, Config } from "./config";
 import { MessageAnalyzer } from "./modules/messageAnalyzer";
-
-const SELECTORS = {
-  app_ready:
-    "[data-testid='pane-side'],[data-testid='chat-list'],[aria-label='Lista de chats'],[role='grid']",
-  qr_any:
-    "canvas[aria-label*='QR'],img[alt*='QR'],[data-testid='qr-code'],canvas[aria-label*=QR]",
-  continue_btns:
-    "[data-testid='popup-controls-ok'],button[data-testid='popup-controls-ok'],div[role='button']:has-text('Continuar'),button:has-text('Continuar'),[data-testid='continue-button'],button:has-text('Continue'),[aria-label='Continuar']",
-  conversation:
-    "[data-testid='conversation-panel-messages'], footer div[contenteditable='true'], div[data-testid='conversation-compose-box-input']",
-  message_in: "div.message-in",
-  composer: "footer div[contenteditable='true'], div[contenteditable='true'][role='textbox']",
-  search_input: "div[contenteditable='true'][data-tab], div[contenteditable='true'][role='textbox']",
-  chat_list_items: "[data-testid='chat-list'] [data-testid*='cell-frame']"
-} as const;
-
-const twilioVariants = (name: string) => [
-  name,
-  "Twilio",
-  "+1 (415) 523-8886",
-  "+14155238886",
-  "415 523-8886",
-  "4155238886"
-];
+import { SELECTORS } from "./constants/selectors";
+import {
+  CHAT_MENU_BUTTON_SELECTORS,
+  CLEAR_CHAT_OPTION_SELECTORS,
+  CONFIRM_CLEAR_CHAT_SELECTORS,
+} from "./constants/chatMaintenance";
+import { DELAYS, TIMEOUTS } from "./constants/timing";
+import { getContactSearchVariants } from "./data/contactVariants";
+import { ConversationLogger } from "./modules/conversationLogger";
+import { determineAutoResponse } from "./modules/autoResponder";
+import { sleep } from "./utils/time";
+import { sanitizeMessage } from "./utils/text";
 
 export class WhatsAppWebClient {
   cfg: Config;
@@ -45,15 +33,7 @@ export class WhatsAppWebClient {
   private messageAnalyzer?: MessageAnalyzer;
 
   // Sistema de logging de conversación completa
-  private conversationLog: Array<{
-    index: number;
-    type: 'SENT' | 'RECEIVED';
-    timestamp: string;
-    message: string;
-    whatsappTimestamp?: string; // Hora real del mensaje desde WhatsApp
-  }> = [];
-  private conversationStarted: boolean = false;
-  private messageIndex: number = 0;
+  private conversationLogger = new ConversationLogger();
 
   // Devuelve la cache actual de mensajes realmente nuevos (legacy compatibility)
   public getLastTrulyNewMessages(): string[] {
@@ -66,83 +46,10 @@ export class WhatsAppWebClient {
   }
 
   /**
-   * Registra un mensaje en el log de conversación
+   * Asegura que el logger esté inicializado y sincroniza el baseline de mensajes.
    */
-  private logMessage(type: 'SENT' | 'RECEIVED', message: string, whatsappTimestamp?: string): void {
-    this.messageIndex++;
-    const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
-    
-    this.conversationLog.push({
-      index: this.messageIndex,
-      type,
-      timestamp,
-      message: message.trim(),
-      whatsappTimestamp
-    });
-    
-    const timeInfo = whatsappTimestamp ? ` (WA: ${whatsappTimestamp})` : '';
-    console.log(`[${this.messageIndex}] ${type === 'SENT' ? '→' : '←'} ${message.trim()}${timeInfo}`);
-  }
-
-  /**
-   * Imprime el log completo de la conversación y lo guarda en archivo
-   */
-  private async printAndSaveConversationLog(): Promise<void> {
-    if (this.conversationLog.length === 0) {
-      console.log("=== NO HAY CONVERSACIÓN PARA REGISTRAR ===");
-      return;
-    }
-
-    const logLines: string[] = [];
-    logLines.push("=".repeat(80));
-    logLines.push("REGISTRO COMPLETO DE CONVERSACIÓN");
-    logLines.push("=".repeat(80));
-    logLines.push(`Fecha: ${new Date().toLocaleString('es-ES')}`);
-    logLines.push(`Total de mensajes: ${this.conversationLog.length}`);
-    logLines.push("");
-
-    this.conversationLog.forEach(entry => {
-      const arrow = entry.type === 'SENT' ? '→ ENVIADO' : '← RECIBIDO';
-      const whatsappTime = entry.whatsappTimestamp ? ` [WA: ${entry.whatsappTimestamp}]` : '';
-      logLines.push(`[${entry.index.toString().padStart(3, '0')}] ${entry.timestamp} ${arrow}${whatsappTime}`);
-      logLines.push(`    ${entry.message}`);
-      logLines.push("");
-    });
-
-    logLines.push("=".repeat(80));
-    logLines.push("FIN DEL REGISTRO");
-    logLines.push("=".repeat(80));
-
-    // Imprimir en consola
-    logLines.forEach(line => console.log(line));
-
-    // Guardar en archivo
-    try {
-      const logsDir = "logs";
-      if (!fs.existsSync(logsDir)) {
-        fs.mkdirSync(logsDir, { recursive: true });
-      }
-
-      const timestamp = new Date().toISOString().replace(/[:]/g, '-').replace(/\..+/, '');
-      const filename = path.join(logsDir, `conversation_${timestamp}.log`);
-      
-      fs.writeFileSync(filename, logLines.join('\n'), 'utf8');
-      console.log(`📝 Log de conversación guardado en: ${filename}`);
-    } catch (error) {
-      console.log(`❌ Error guardando log de conversación: ${error}`);
-    }
-  }
-
-  /**
-   * Inicia el registro de conversación
-   */
-  private async startConversationLogging(): Promise<void> {
-    if (!this.conversationStarted) {
-      this.conversationStarted = true;
-      this.conversationLog = [];
-      this.messageIndex = 0;
-      console.log("🎯 INICIO DE REGISTRO DE CONVERSACIÓN");
-      
+  private async ensureConversationLogging(): Promise<void> {
+    if (this.conversationLogger.start()) {
       // Establecer baseline: contar mensajes actuales para ignorar mensajes históricos
       await this.resetMessageBaseline();
     }
@@ -165,30 +72,6 @@ export class WhatsAppWebClient {
 
   constructor(cfg: Config) {
     this.cfg = cfg;
-  }
-
-  // Limpia artefactos como timestamps de WhatsApp ("1:52 p.m.") del texto extraído
-  private sanitizeMessage(text: string): string {
-    if (!text) return text;
-    let out = text;
-    // Remover timestamps comunes al final o dentro del texto
-    // Patrones: "1:52 p.m.", "12:05 a.m.", variantes con espacios: "a. m.", "p. m.", y variantes unicode (no-break space)
-    const timePattern = /\b\d{1,2}:\d{2}\s*[\u00A0\s]?(?:a\.m\.|p\.m\.|a\.?\s*m\.?|p\.?\s*m\.?|AM|PM|am|pm)\.?\b/gi;
-    out = out.replace(timePattern, "");
-    // También eliminar tokens de hora aislados que queden al final de una burbuja, tipo "3:37 p.m." o "3:37 PM"
-    out = out.replace(/\s*\b\d{1,2}:\d{2}\s*(?:AM|PM|am|pm|a\.m\.|p\.m\.|a\.?\s*m\.?|p\.?\s*m\.?)\.?\s*$/gi, "");
-    // Normalizar múltiples espacios y espacios antes de puntuación
-    out = out.replace(/\s{2,}/g, " ").replace(/\s+([.,;:!?])/g, "$1").trim();
-    return out;
-  }
-
-  private isTwilioSandboxMessage(text: string): boolean {
-    const lowerText = text.toLowerCase();
-    return lowerText.includes("twilio sandbox") && 
-           (lowerText.includes("not connected to a sandbox") || 
-            lowerText.includes("your number") && lowerText.includes("whatsapp:")) &&
-           lowerText.includes("join") &&
-           lowerText.includes("sandbox name");
   }
 
   /**
@@ -327,13 +210,13 @@ export class WhatsAppWebClient {
         console.log(`Respondiendo automáticamente con la opción: ${selectedOption}`);
         
         // Esperar un poco antes de responder para simular comportamiento humano
-        await new Promise(r => setTimeout(r, 1500));
+        await sleep(DELAYS.HUMAN_REPLY);
         
         // Enviar la opción seleccionada
         await this.sendMessage(selectedOption);
         
         // Esperar la respuesta del bot
-        await new Promise(r => setTimeout(r, 3000));
+        await sleep(DELAYS.OPTION_RESPONSE_WAIT);
         
         // CRÍTICO: Actualizar baseline después de enviar opción para evitar duplicados
         const newBaselineCount = await this.locator("message_in").count();
@@ -347,7 +230,7 @@ export class WhatsAppWebClient {
         if (newResponse && newResponse !== this.last_reply) {
           this.last_reply = newResponse;
           const timestamp = await this.getTimestampForMessage(newResponse);
-          this.logMessage('RECEIVED', newResponse, timestamp);
+          this.conversationLogger.log('RECEIVED', newResponse, timestamp);
           console.log(`Nueva respuesta después de seleccionar opción: ${newResponse}`);
           if (/ya existe/i.test(newResponse)) {
             this.earlyExistsDetected = true;
@@ -378,12 +261,12 @@ export class WhatsAppWebClient {
           await this.sendMessage(message);
           
           // Esperar respuesta y actualizar last_reply
-          await new Promise(r => setTimeout(r, 3000));
+          await sleep(DELAYS.OPTION_RESPONSE_WAIT);
           const newResponse = await this.lastIncomingText();
           if (newResponse && newResponse !== this.last_reply) {
             this.last_reply = newResponse;
             const timestamp = await this.getTimestampForMessage(newResponse);
-            this.logMessage('RECEIVED', newResponse, timestamp);
+            this.conversationLogger.log('RECEIVED', newResponse, timestamp);
             console.log(`Nueva respuesta tras opción continua: ${newResponse}`);
             
             // Verificar si hay indicador de 'ya existe'
@@ -419,7 +302,7 @@ export class WhatsAppWebClient {
     if (!this.page) throw new Error("Page not ready");
     
     // Iniciar logging en el primer mensaje
-    await this.startConversationLogging();
+    await this.ensureConversationLogging();
     
     await this.page.evaluate(() => {
       const prefer = document.querySelector("footer div[contenteditable='true']") as HTMLElement | null;
@@ -442,7 +325,7 @@ export class WhatsAppWebClient {
     await this.page.keyboard.press("Enter");
     
     // Registrar mensaje enviado
-    this.logMessage('SENT', message);
+    this.conversationLogger.log('SENT', message);
     console.log(`Mensaje enviado: ${message}`);
   }
 
@@ -463,7 +346,7 @@ export class WhatsAppWebClient {
     return false;
   }
 
-  private async waitAny(selectorCsv: string, timeout = 15000) {
+  private async waitAny(selectorCsv: string, timeout = TIMEOUTS.APP_READY) {
     if (!this.page) throw new Error("Page not ready");
     return this.page.waitForSelector(selectorCsv, { timeout });
   }
@@ -534,7 +417,7 @@ export class WhatsAppWebClient {
     const timestamp = this.extractTimestampFromMessage(rawText);
     
     return {
-      text: this.sanitizeMessage(combined),
+      text: sanitizeMessage(combined),
       timestamp,
       rawText
     };
@@ -605,10 +488,10 @@ export class WhatsAppWebClient {
   async stop() {
     try {
       // Imprimir y guardar el log de conversación antes de cerrar
-      await this.printAndSaveConversationLog();
-      
+      await this.conversationLogger.flush();
+
       if (this.context) {
-        await new Promise((r) => setTimeout(r, 1500));
+        await sleep(DELAYS.HUMAN_REPLY);
         await this.context.close();
       }
     } finally {
@@ -626,7 +509,7 @@ export class WhatsAppWebClient {
     const deadline = Date.now() + timeoutTotal;
     while (Date.now() < deadline) {
       try {
-        await this.waitAny(`${SELECTORS.app_ready},${SELECTORS.qr_any}`, 10_000);
+        await this.waitAny(`${SELECTORS.app_ready},${SELECTORS.qr_any}`, TIMEOUTS.LOGIN_SELECTOR);
       } catch {
         continue;
       }
@@ -640,7 +523,7 @@ export class WhatsAppWebClient {
   console.log("QR visible. Esperando a que el login complete…");
         await this.clickIfVisible(SELECTORS.continue_btns);
         try {
-          await this.waitAny(SELECTORS.app_ready, 20_000);
+          await this.waitAny(SELECTORS.app_ready, TIMEOUTS.QR_LOGIN);
           console.log("Login completado.");
           return;
         } catch {}
@@ -652,11 +535,11 @@ export class WhatsAppWebClient {
   async open_chat(name: string) {
     if (!this.page) throw new Error("Page not ready");
   console.log(`Abriendo chat: ${name}`);
-    await this.waitAny(SELECTORS.app_ready, 30_000);
+    await this.waitAny(SELECTORS.app_ready, TIMEOUTS.APP_READY);
   console.log("Interfaz de WhatsApp lista");
 
   console.log("Buscando contacto en la lista de chats...");
-    for (const variant of twilioVariants(name)) {
+    for (const variant of getContactSearchVariants(name)) {
       console.log(`   - Buscando: ${variant}`);
       const chatItem = this.page.locator(`span[title='${variant}']`).first();
       if (await chatItem.isVisible()) {
@@ -739,25 +622,10 @@ export class WhatsAppWebClient {
     try {
       console.log("🧹 Iniciando limpieza del historial del chat...");
       
-      // Buscar específicamente los tres puntos verticales con el icono correcto
-      const threeDotSelectors = [
-        // Buscar TODOS los botones con more-refreshed para poder descartar el primero
-        'div[role="button"]:has(span[data-icon="more-refreshed"])',
-        'header div[role="button"]:has(span[data-icon="more-refreshed"])',
-        // Fallback: buscar directamente el span y luego el botón padre
-        'span[data-icon="more-refreshed"]',
-        'header span[data-icon="more-refreshed"]',
-        // Selectores más específicos por posición
-        'header div[role="button"]:has([data-icon="more-refreshed"]):last-of-type',
-        'header div[role="button"]:has([data-icon="more-refreshed"]):nth-child(2)',
-        // Último recurso: todos los botones del header (para hacer clic en el segundo)
-        'header div[role="button"]'
-      ];
-
       let menuClicked = false;
       let attemptCount = 0;
-      
-      for (const selector of threeDotSelectors) {
+
+      for (const selector of CHAT_MENU_BUTTON_SELECTORS) {
         try {
           console.log(`🔍 Intentando selector de menú: ${selector}`);
           const menuButtons = this.page.locator(selector);
@@ -786,7 +654,7 @@ export class WhatsAppWebClient {
                   console.log(`✅ Clic realizado en elemento ${i} del selector: ${selector}`);
                   
                   // Esperar a que aparezca el menú
-                  await new Promise(r => setTimeout(r, 2000));
+                  await sleep(DELAYS.MENU_APPEAR);
                   
                   // Verificar si apareció un menú real
                   const possibleMenus = this.page.locator(
@@ -847,7 +715,7 @@ export class WhatsAppWebClient {
                 console.log(`✅ Clic realizado en botón ${i}`);
                 
                 // Esperar un momento a ver si aparece un menú
-                await new Promise(r => setTimeout(r, 1500));
+                await sleep(DELAYS.HUMAN_REPLY);
                 
                 // Verificar si apareció algún menú o dropdown
                 const possibleMenus = this.page.locator(
@@ -888,29 +756,12 @@ export class WhatsAppWebClient {
       }
 
       // Esperar a que aparezca el menú desplegable
-      await new Promise(r => setTimeout(r, 2000));
+      await sleep(DELAYS.MENU_APPEAR);
 
       // Buscar la opción "Vaciar chat"
-      const clearChatSelectors = [
-        'div[role="button"]:has-text("Vaciar chat")',
-        'div[role="button"]:has-text("Clear chat")',
-        'li:has-text("Vaciar chat")',
-        'li:has-text("Clear chat")',
-        'div:has-text("Vaciar chat"):visible',
-        'div:has-text("Clear chat"):visible',
-        // Selectores más específicos para el menú desplegable
-        '[role="menuitem"]:has-text("Vaciar chat")',
-        '[role="menuitem"]:has-text("Clear chat")',
-        'div[data-testid]:has-text("Vaciar")',
-        'div[data-testid]:has-text("Clear")',
-        // Fallback para texto que contenga "vaciar" o "clear"
-        'div:text-matches(".*[Vv]aciar.*", "i"):visible',
-        'div:text-matches(".*[Cc]lear.*", "i"):visible'
-      ];
-
       let clearOptionFound = false;
-      
-      for (const selector of clearChatSelectors) {
+
+      for (const selector of CLEAR_CHAT_OPTION_SELECTORS) {
         try {
           console.log(`🔍 Buscando opción "Vaciar chat": ${selector}`);
           const clearOption = this.page.locator(selector);
@@ -952,24 +803,12 @@ export class WhatsAppWebClient {
       }
 
       // Esperar el modal de confirmación
-      await new Promise(r => setTimeout(r, 2000));
+      await sleep(DELAYS.MENU_APPEAR);
       
       // Buscar y confirmar la limpieza
-      const confirmSelectors = [
-        'div[role="button"]:has-text("Vaciar")',
-        'div[role="button"]:has-text("Clear")',
-        'button:has-text("Vaciar")',
-        'button:has-text("Clear")',
-        'div[role="button"]:has-text("Confirmar")',
-        'div[role="button"]:has-text("Confirm")',
-        // Selectores más específicos para el modal
-        '[data-testid]:has-text("Vaciar"):visible',
-        '[data-testid]:has-text("Clear"):visible'
-      ];
-
       let confirmed = false;
-      
-      for (const selector of confirmSelectors) {
+
+      for (const selector of CONFIRM_CLEAR_CHAT_SELECTORS) {
         try {
           console.log(`🔍 Buscando confirmación: ${selector}`);
           const confirmButton = this.page.locator(selector);
@@ -988,7 +827,7 @@ export class WhatsAppWebClient {
 
       if (confirmed) {
         // Esperar a que se complete la limpieza
-        await new Promise(r => setTimeout(r, 3000));
+        await sleep(DELAYS.CLEAR_CHAT_COMPLETION);
         
         // Resetear el baseline de mensajes
         this.lastMessageCountBeforeSend = 0;
@@ -1047,60 +886,14 @@ export class WhatsAppWebClient {
     return null;
   }
 
-  /**
-   * Determina la respuesta apropiada basada en la pregunta del bot
-   */
-  private determineAppropriateResponse(botMessage: string, defaultResponse: string): string {
-    if (!botMessage) return defaultResponse;
-    
-    const message = botMessage.toLowerCase();
-    
-    // Mapeo de preguntas del bot a respuestas apropiadas
-    if (message.includes("nombre del cultivo") || message.includes("nombre del producto o cultivo")) {
-      return "maíz";
-    }
-    if (message.includes("nombre de la variedad")) {
-      return "p 8660";
-    }
-    if (message.includes("destino del cultivo")) {
-      return "pienso";
-    }
-    if (message.includes("marca del cultivo")) {
-      return this.created_name || "marca-auto-" + Date.now().toString(36);
-    }
-    if (message.includes("nombre de la campaña")) {
-      return "campaña-test-" + Date.now().toString(36).slice(-4);
-    }
-    if (message.includes("nombre de la granja")) {
-      return "granja-test";
-    }
-    if (message.includes("nombre del campo")) {
-      return "campo-test";
-    }
-    if (message.includes("dosis")) {
-      return "100";
-    }
-    if (message.includes("precio") && message.includes("omitir")) {
-      return "omitir";
-    }
-    
-    // Manejo de mensajes de error o confirmación
-    if (message.includes("operación cancelada") || message.includes("ya existe")) {
-      console.log(`🔄 Mensaje de estado detectado: "${botMessage}" - continuando con respuesta por defecto`);
-      return defaultResponse;
-    }
-    
-    // Si no reconoce la pregunta, usar respuesta por defecto
-    console.log(`⚠️ Pregunta no reconocida: "${botMessage}" - usando respuesta por defecto: "${defaultResponse}"`);
-    return defaultResponse;
-  }
-
   async send_and_wait(message: string, timeoutMs = 10_000): Promise<string> {
     if (!this.page) throw new Error("Page not ready");
     
     // Obtener el último mensaje del bot para determinar qué pregunta está haciendo
     const lastBotMessage = this.last_reply || "";
-    const appropriateResponse = this.determineAppropriateResponse(lastBotMessage, message);
+    const appropriateResponse = determineAutoResponse(lastBotMessage, message, {
+      createdName: this.created_name,
+    });
     
     if (appropriateResponse !== message) {
       console.log(`🧠 Pregunta detectada: "${lastBotMessage}" → Respuesta inteligente: "${appropriateResponse}" (en lugar de "${message}")`);
@@ -1121,9 +914,9 @@ export class WhatsAppWebClient {
     if (shouldOmit) console.log("Detección previa de 'omitir'; enviando 'omitir'.");
 
     await this.sendMessage(toSend);
-    
+
     // Esperar un poco para que el mensaje se envíe
-    await new Promise(r => setTimeout(r, 1000));
+    await sleep(DELAYS.POST_SEND);
     
     // Usar directamente el fallback legacy que funciona mejor
     return await this.waitForBotResponse(baselineCount, timeoutMs);
@@ -1184,19 +977,19 @@ export class WhatsAppWebClient {
         console.log(`Error contando mensajes: ${error}`);
       }
 
-      await new Promise((r) => setTimeout(r, 500));
+      await sleep(DELAYS.MESSAGE_POLL_INTERVAL);
     }
 
     // Leer la respuesta final y determinar mensajes nuevos reales
     try {
-      await new Promise((r) => setTimeout(r, 120));
+      await sleep(DELAYS.RESPONSE_STABILIZATION);
       const newMessages = await this.getNewIncomingMessagesAfterSend();
       if (newMessages.length) {
         // Registrar todos los mensajes nuevos recibidos con timestamps
         for (const message of newMessages) {
           // Obtener el timestamp real del mensaje específico (no reutilizar búsquedas previas)
           const timestamp = await this.getTimestampForMessage(message);
-          this.logMessage('RECEIVED', message, timestamp);
+          this.conversationLogger.log('RECEIVED', message, timestamp);
         }
         
         const lastText = newMessages[newMessages.length - 1];
@@ -1221,13 +1014,13 @@ export class WhatsAppWebClient {
           console.log(`🎯 RESPUESTA AUTOMÁTICA CON PRIORIDAD JERÁRQUICA: "${priorityOption}"`);
           
           // Esperar un poco antes de responder
-          await new Promise(r => setTimeout(r, 1500));
+          await sleep(DELAYS.HUMAN_REPLY);
           
           // Enviar la opción prioritaria
           await this.sendMessage(priorityOption);
           
           // Esperar un poco para que el mensaje se envíe
-          await new Promise(r => setTimeout(r, 1000));
+          await sleep(DELAYS.POST_SEND);
           
           // Actualizar baseline para la nueva espera
           const newBaselineCount = await this.locator("message_in").count();
@@ -1253,7 +1046,7 @@ export class WhatsAppWebClient {
         if (fallback) {
           console.log(`Respuesta final (fallback) recibida: ${fallback}`);
           const timestamp = await this.getTimestampForMessage(fallback);
-          this.logMessage('RECEIVED', fallback, timestamp);
+          this.conversationLogger.log('RECEIVED', fallback, timestamp);
           this.last_reply = fallback;
           this.lastMessageCountBeforeSend = currentCount;
           return fallback;
@@ -1265,10 +1058,10 @@ export class WhatsAppWebClient {
       if (latestAnyway) {
         console.log(`Sin nuevos mensajes; reutilizando último entrante: ${latestAnyway}`);
         // Solo registrar si es diferente al último registrado
-        const lastLogged = this.conversationLog[this.conversationLog.length - 1];
+        const lastLogged = this.conversationLogger.getLastEntry();
         if (!lastLogged || lastLogged.message !== latestAnyway || lastLogged.type !== 'RECEIVED') {
           const timestamp = await this.getTimestampForMessage(latestAnyway);
-          this.logMessage('RECEIVED', latestAnyway, timestamp);
+          this.conversationLogger.log('RECEIVED', latestAnyway, timestamp);
         }
         this.last_reply = latestAnyway;
         return latestAnyway;
@@ -1340,7 +1133,7 @@ export class WhatsAppWebClient {
       
       if (!response || response.trim() === "") {
         console.log(`ℹ️ No se recibió respuesta en iteración ${iteration}, continuando...`);
-        await new Promise(r => setTimeout(r, 2000));
+        await sleep(DELAYS.RETRY_NO_RESPONSE);
         continue;
       }
       
@@ -1374,23 +1167,25 @@ export class WhatsAppWebClient {
       if (priorityOption) {
         console.log(`🎯 Iteración ${iteration}: Enviando opción prioritaria "${priorityOption}"`);
         await this.sendMessage(priorityOption);
-        await new Promise(r => setTimeout(r, 1000)); // Esperar que se envíe
+        await sleep(DELAYS.POST_SEND); // Esperar que se envíe
         continue; // Continuar con la siguiente iteración
       }
       
       // Si no hay opciones, determinar respuesta inteligente basada en el contexto
-      const intelligentResponse = this.determineAppropriateResponse(response, "");
+      const intelligentResponse = determineAutoResponse(response, "", {
+        createdName: this.created_name,
+      });
       
       if (intelligentResponse && intelligentResponse.trim() !== "") {
         console.log(`🧠 Iteración ${iteration}: Enviando respuesta inteligente "${intelligentResponse}" para "${response}"`);
         await this.sendMessage(intelligentResponse);
-        await new Promise(r => setTimeout(r, 1000)); // Esperar que se envíe
+        await sleep(DELAYS.POST_SEND); // Esperar que se envíe
         continue;
       }
       
       // Si no se puede determinar qué hacer, es posible que el flujo esté completo o esperando algo específico
       console.log(`⏳ Iteración ${iteration}: No se pudo determinar respuesta para "${response}" - esperando...`);
-      await new Promise(r => setTimeout(r, 3000));
+      await sleep(DELAYS.RETRY_UNKNOWN);
     }
     
     console.log(`❌ FLUJO ABORTADO: Máximo de iteraciones (${maxIterations}) alcanzado`);

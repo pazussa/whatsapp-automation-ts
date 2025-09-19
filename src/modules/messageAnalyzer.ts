@@ -1,4 +1,6 @@
 import { Page, Locator } from "playwright";
+import { DELAYS } from "../constants/timing";
+import { sanitizeMessage } from "../utils/text";
 
 /**
  * Módulo para análisis y manejo de mensajes de WhatsApp
@@ -46,7 +48,7 @@ export class MessageAnalyzer {
    */
   async getRecentMessagesAfterSend(): Promise<string[]> {
     try {
-      await this.page.waitForTimeout(1000);
+      await this.page.waitForTimeout(DELAYS.NEW_MESSAGES_FETCH);
       
       // Usar el mismo selector que funciona en el código legacy
       const allIncoming = await this.page
@@ -83,7 +85,7 @@ export class MessageAnalyzer {
   async updateBaselineFromCurrentMessages(): Promise<void> {
     try {
       // Esperar un momento para que la página se estabilice
-      await this.page.waitForTimeout(500);
+      await this.page.waitForTimeout(DELAYS.BASELINE_STABILIZATION);
       
       // Usar el mismo selector que funciona en el código legacy
       const allIncoming = await this.page
@@ -116,7 +118,7 @@ export class MessageAnalyzer {
     if (!text) return null;
     
     // Sanear el texto primero
-    const cleaned = this.sanitizeMessage(text);
+    const cleaned = sanitizeMessage(text);
     console.log(`DEBUG: Buscando opciones en texto limpio: "${cleaned}"`);
     
     // Buscar EXACTAMENTE el patrón "Opciones:" (case insensitive pero específico)
@@ -133,7 +135,7 @@ export class MessageAnalyzer {
       let pieces = optionsBlob
         .split(/\s*(?:,|;|\||\/|\u2022|\u2023|\u25E6|\u2043|\u2219)\s*/)
         .flatMap(p => p.split(/\s*(?:\d+\)|\d+\.|-\s)\s*/))
-        .map(option => this.sanitizeMessage(option).trim())
+        .map(option => sanitizeMessage(option).trim())
         .filter(option => option.length > 0);
 
       console.log(`DEBUG: Piezas antes de filtrar: ${JSON.stringify(pieces)}`);
@@ -187,7 +189,7 @@ export class MessageAnalyzer {
     // Limpiar completamente las opciones de marcas de tiempo
     const cleanedOptions = options.map(opt => {
       // Usar la misma función sanitizeMessage para limpiar marcas de tiempo
-      return this.sanitizeMessage(opt);
+      return sanitizeMessage(opt);
     }).filter(opt => opt.length >= 1);
 
     console.log(`DEBUG: Opciones después de limpiar marcas de tiempo: ${JSON.stringify(cleanedOptions)}`);
@@ -249,7 +251,7 @@ export class MessageAnalyzer {
       
       try {
         // Esperar un poco antes de revisar por opciones
-        await this.page.waitForTimeout(1000);
+        await this.page.waitForTimeout(DELAYS.OPTION_CHECK_INTERVAL);
         
         const selectedOption = await this.detectAndSelectOption();
         
@@ -265,7 +267,7 @@ export class MessageAnalyzer {
         await sendMessageCallback(selectedOption);
         
         // Esperar respuesta antes del siguiente ciclo
-        await this.page.waitForTimeout(3000);
+        await this.page.waitForTimeout(DELAYS.OPTION_RESPONSE_WAIT);
         
         // Actualizar el baseline para el siguiente ciclo
         await this.updateBaselineFromCurrentMessages();
@@ -277,36 +279,6 @@ export class MessageAnalyzer {
     }
     
     return foundAnyOptions;
-  }
-
-  /**
-   * Sanitiza el texto de los mensajes, eliminando marcas de tiempo y caracteres especiales
-   */
-  private sanitizeMessage(rawText: string): string {
-    if (!rawText) return "";
-    
-    let out = rawText;
-    
-    // Remover timestamps comunes al final o dentro del texto
-    // Patrones: "1:52 p.m.", "12:05 a.m.", variantes con espacios: "a. m.", "p. m.", y variantes unicode (no-break space)
-    const timePattern = /\b\d{1,2}:\d{2}\s*[\u00A0\s]?(?:a\.m\.|p\.m\.|a\.?\s*m\.?|p\.?\s*m\.?|AM|PM|am|pm)\.?\b/gi;
-    out = out.replace(timePattern, "");
-    
-    // También eliminar tokens de hora aislados que queden al final de una burbuja, tipo "3:37 p.m." o "3:37 PM"
-    out = out.replace(/\s*\b\d{1,2}:\d{2}\s*(?:AM|PM|am|pm|a\.m\.|p\.m\.|a\.?\s*m\.?|p\.?\s*m\.?)\.?\s*$/gi, "");
-    
-    // Limpiar caracteres especiales de Unicode
-    out = out
-      .replace(/[\u200B-\u200D\uFEFF]/g, "")
-      .replace(/\u00A0/g, " ");
-    
-    // Normalizar múltiples espacios y espacios antes de puntuación
-    out = out.replace(/\s{2,}/g, " ").replace(/\s+([.,;:!?])/g, "$1");
-    
-    // Eliminar punto final si existe
-    out = out.replace(/\.\s*$/, "");
-    
-    return out.trim();
   }
 
   /**
@@ -343,7 +315,7 @@ export class MessageAnalyzer {
       }
       
       const combined = parts.join(" ").trim();
-      return this.sanitizeMessage(combined);
+      return sanitizeMessage(combined);
     } catch {
       return "";
     }
