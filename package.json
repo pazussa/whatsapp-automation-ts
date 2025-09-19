@@ -28,7 +28,8 @@
     "docs:plan:html": "node scripts/docx-to-html.js",
     "docs:plan:preview": "node scripts/docx-to-html.js && xdg-open reports/plan-pasantia.html >/dev/null 2>&1 || true",
     "typecheck": "tsc --noEmit",
-    "postinstall": "playwright install"
+    "postinstall": "playwright install",
+    "export:code": "node scripts/export-code.js"
   },
   "keywords": [],
   "author": "",
