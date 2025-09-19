@@ -4,20 +4,31 @@ package-lock.json
 npm-debug.log*
 yarn.lock
 pnpm-lock.yaml
+*.log
+
+# TypeScript incremental build info
+*.tsbuildinfo
 
 # Build artifacts
 /dist/
 /out/
 /coverage/
 
+# Test results
+/test-results/
+/playwright-test-results/
+
 # Playwright/Chromium user data
 **/.local-chromium/
 **/playwright/.cache/
 **/playwright-report/
+**/.playwright-cache/
 
 # Project runtime artifacts
 reports/
 screenshots/
+.reports/
+logs/
 .whatsapp-session-qa/
 .env
 .env.*
