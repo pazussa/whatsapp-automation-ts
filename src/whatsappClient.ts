@@ -167,6 +167,9 @@ export class WhatsAppWebClient {
     this.cfg = cfg;
   }
 
+  // Bandera para no repetir el join del sandbox de Twilio
+  private twilioSandboxJoined: boolean = false;
+
   // Limpia artefactos como timestamps de WhatsApp ("1:52 p.m.") del texto extraído
   private sanitizeMessage(text: string): string {
     if (!text) return text;
@@ -1206,6 +1209,29 @@ export class WhatsAppWebClient {
         // Actualizar baseline para futuros envíos
         this.lastMessageCountBeforeSend = await this.locator("message_in").count();
         
+        // === Manejo automático de Twilio Sandbox ===
+        if (!this.twilioSandboxJoined) {
+          const sandboxTrigger = newMessages.find(m => /twilio sandbox:/i.test(m));
+          if (sandboxTrigger) {
+            console.log("🚀 Detectado mensaje de Twilio Sandbox. Enviando frase de unión 'join change-ask' automaticamente...");
+            try {
+              await this.sendMessage("join change-ask");
+              this.twilioSandboxJoined = true;
+              // Pequeña espera para que llegue la confirmación
+              await new Promise(r => setTimeout(r, 1500));
+              // Reestablecer baseline tras enviar el join
+              const newBaseline = await this.locator("message_in").count();
+              this.lastMessageCountBeforeSend = newBaseline;
+              if (this.messageAnalyzer) this.messageAnalyzer.setBaseline(newBaseline);
+              // Esperar respuesta posterior y continuar flujo normal
+              console.log("🔄 Esperando confirmación posterior al join del sandbox...");
+              return await this.waitForBotResponse(newBaseline, timeoutMs);
+            } catch (e) {
+              console.log(`⚠️ Error enviando frase de unión del sandbox: ${e}`);
+            }
+          }
+        }
+
         if (/ya existe/i.test(lastText)) {
           this.earlyExistsDetected = true;
           this.earlyExistsMessage = lastText;
